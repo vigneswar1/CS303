@@ -1,97 +1,112 @@
-import copy
 import random
+from collections import defaultdict, Counter
 
-class SamplingTypes:
-    def __init__(self):
-        self.nodes = {'B':[],'E':[],'A':['B','E'],'J':['A'],'M':['A']}
-        self.prob_table = {
-            'B':{'T':0.001,'F':0.999},
-            'E':{'T':0.002,'F':0.998},
-            'A':{('T','T'):{'T':0.95,'F':0.05},('T','F'):{'T':0.94,'F':0.06},('F','T'):{'T':0.29,'F':0.71},('F','F'):{'T':0.001,'F':0.999}},
-            'J':{('T',):{'T':0.90,'F':0.10},('F',):{'T':0.05,'F':0.95}},
-            'M':{('T',):{'T':0.70,'F':0.30},('F',):{'T':0.01,'F':0.99}}
-        }
-        self.var_order = ['B','E','A','J','M']
-    
-    def get_prob(self, node, evidence, truthvalue):
-        if not self.nodes[node]:
-            return self.prob_table[node][truthvalue]
-        else:
-            parent_vals = tuple(evidence[p] for p in self.nodes[node])
-            return self.prob_table[node][parent_vals][truthvalue]
-        
+class BayesianNetwork:
+    def __init__(self, network):
+        self.network = network
+        self.variables = list(network.keys())
+
+    def sample_variable(self, var, sampled_values):
+        parents = self.network[var]['parents']
+        parent_values = tuple(sampled_values[p] for p in parents)
+        p_true = self.network[var]['cpt'][parent_values]
+        return random.random() < p_true
+
     def prior_sample(self):
-        sample = {}
-        for var in self.var_order:
-            prob_T = self.get_prob(var, sample, 'T')
-            sample[var] = 'T' if random.random() < prob_T else 'F'
-        return sample
-        
-    def rejection_sampling(self, query_var, query_val, evidence, N=10000):
-        count = 0
-        match = 0
+        sampled = {}
+        for var in self.variables:
+            sampled[var] = self.sample_variable(var, sampled)
+        return sampled
+
+    def rejection_sampling(self, query_var, evidence, N=10000):
+        counts = Counter()
         for _ in range(N):
-            s = self.prior_sample()
-            valid = True
-            for var in evidence:
-                if s[var] != evidence[var]:
-                    valid = False
-                    break
-            if valid:
-                count += 1
-                if s[query_var] == query_val:
-                    match +=1
-        return match/count if count else 0.0
-        
-    def likelihood_weighting(self, query_var, query_val, evidence, N=10000):
-        total = 0.0
-        w_match = 0.0
+            sample = self.prior_sample()
+            if all(sample[e] == v for e, v in evidence.items()):
+                counts[sample[query_var]] += 1
+        total = sum(counts.values())
+        if total == 0:
+            return None
+        return {k: v / total for k, v in counts.items()}
+
+    def weighted_sample(self, evidence):
+        w = 1.0
+        sampled = {}
+        for var in self.variables:
+            parents = self.network[var]['parents']
+            parent_values = tuple(sampled[p] for p in parents)
+            p_true = self.network[var]['cpt'][parent_values]
+            if var in evidence:
+                sampled[var] = evidence[var]
+                w *= p_true if evidence[var] else (1 - p_true)
+            else:
+                sampled[var] = random.random() < p_true
+        return sampled, w
+
+    def likelihood_weighting(self, query_var, evidence, N=10000):
+        weighted_counts = defaultdict(float)
         for _ in range(N):
-            sample = {}
-            weight = 1.0
-            for var in self.var_order:
-                if var in evidence:
-                    sample[var] = evidence[var]
-                    weight *= self.get_prob(var, sample, evidence[var])
-                else:
-                    prob_T = self.get_prob(var, sample, 'T')
-                    sample[var] = 'T' if random.random() < prob_T else 'F'
-            total += weight
-            if sample[query_var] == query_val:
-                w_match += weight
-        return w_match/total if total else 0.0
-        
-    def gibbs_sampling(self, query_var, query_val, evidence, N=10000):
+            sample, w = self.weighted_sample(evidence)
+            weighted_counts[sample[query_var]] += w
+        total = sum(weighted_counts.values())
+        return {k: v / total for k, v in weighted_counts.items()}
+
+    def gibbs_sampling(self, query_var, evidence, N=10000, burn_in=1000):
         state = {}
-        for var in self.var_order:
+        for var in self.variables:
             if var in evidence:
                 state[var] = evidence[var]
             else:
-                state[var] = 'T' if random.random() < 0.5 else 'F'
-        cnt = 0
-        ok = 0
-        for _ in range(N):
-            for var in self.var_order:
-                if var not in evidence:
-                    neigh = {}
-                    for v in self.var_order:
-                        if v != var:
-                            neigh[v] = state[v]
-                    prob_T = self.get_prob(var, neigh, 'T')
-                    state[var] = 'T' if random.random() < prob_T else 'F'
-            cnt +=1
-            if state[query_var] == query_val:
-                ok +=1
-        return ok/cnt if cnt else 0.0
+                state[var] = random.choice([True, False])
 
-bs = SamplingTypes()
+        counts = Counter()
 
-print("P(J=T | A=T)")
-print(bs.rejection_sampling('J','T', {'A':'T'},5000))
-print(bs.likelihood_weighting('J','T', {'A':'T'},5000))
-print(bs.gibbs_sampling('J','T', {'A':'T'},5000))
+        for i in range(N + burn_in):
+            for var in self.variables:
+                if var in evidence:
+                    continue
+                p_true = self.mb_conditional(var, state)
+                state[var] = random.random() < p_true
+            if i >= burn_in:
+                counts[state[query_var]] += 1
 
-print("P(B=T | M=T)")
-print(bs.rejection_sampling('B','T', {'M':'T'},5000))
-print(bs.likelihood_weighting('B','T', {'M':'T'},5000))
-print(bs.gibbs_sampling('B','T', {'M':'T'},5000))
+        total = sum(counts.values())
+        return {k: v / total for k, v in counts.items()}
+
+    def mb_conditional(self, var, state):
+        def joint_prob(x_val):
+            s = state.copy()
+            s[var] = x_val
+            parents = self.network[var]['parents']
+            parent_values = tuple(s[p] for p in parents)
+            p_var = self.network[var]['cpt'][parent_values] if x_val else 1 - self.network[var]['cpt'][parent_values]
+            p_children = 1.0
+            for child, node in self.network.items():
+                if var in node['parents']:
+                    parent_values = tuple(s[p] for p in node['parents'])
+                    p_c = node['cpt'][parent_values]
+                    p_children *= p_c if s[child] else (1 - p_c)
+            return p_var * p_children
+
+        p_true = joint_prob(True)
+        p_false = joint_prob(False)
+        return p_true / (p_true + p_false)
+
+
+if __name__ == "__main__":
+    bn = BayesianNetwork({
+        'Burglary': {'parents': [], 'cpt': {(): 0.001}},
+        'Earthquake': {'parents': [], 'cpt': {(): 0.002}},
+        'Alarm': {'parents': ['Burglary', 'Earthquake'],
+                  'cpt': {(True, True): 0.95, (True, False): 0.94,
+                          (False, True): 0.29, (False, False): 0.001}},
+        'JohnCalls': {'parents': ['Alarm'],
+                      'cpt': {(True,): 0.90, (False,): 0.05}},
+        'MaryCalls': {'parents': ['Alarm'],
+                      'cpt': {(True,): 0.70, (False,): 0.01}},
+    })
+
+    print("Prior Sampling:", bn.rejection_sampling('Burglary', {}, 10000))
+    print("Rejection Sampling:", bn.rejection_sampling('Burglary', {'JohnCalls': True, 'MaryCalls': True}, 10000))
+    print("Likelihood Weighting:", bn.likelihood_weighting('Burglary', {'JohnCalls': True, 'MaryCalls': True}, 10000))
+    print("Gibbs Sampling:", bn.gibbs_sampling('Burglary', {'JohnCalls': True, 'MaryCalls': True}, 10000))
